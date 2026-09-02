@@ -6,10 +6,13 @@ import {
   HTML_NAMESPACE,
   NAME,
   NEXT,
+  NS,
+  SVG_NAMESPACE,
   VALUE,
   NODE_TYPE_COMMENT,
   NODE_TYPE_ELEMENT,
   NODE_TYPE_TEXT,
+  asciiLowercase,
 } from './constants.ts';
 import type {Node} from './Node.ts';
 import type {Text} from './Text.ts';
@@ -82,12 +85,26 @@ function isVoidElement(element: Element) {
 export function parseHtml(html: string, contextNode: Node) {
   const document = contextNode.ownerDocument;
   const root = document.createDocumentFragment();
-  const stack: {element: Node; target: ParentNode}[] = [];
+  const stack: {element: Element; target: ParentNode}[] = [];
   let parent: ParentNode = root;
   for (const token of html.matchAll(ELEMENT_TOKENIZER)) {
     const tag = token[1];
     if (tag) {
-      const node = document.createElement(tag);
+      const openElement =
+        stack[stack.length - 1]?.element ?? (contextNode as Element);
+      const parentNamespace = openElement[NS];
+      const normalizedTag = asciiLowercase(tag);
+      const namespace =
+        normalizedTag === 'svg'
+          ? SVG_NAMESPACE
+          : parentNamespace === SVG_NAMESPACE &&
+              asciiLowercase(openElement[NAME]) === 'foreignobject'
+            ? HTML_NAMESPACE
+            : parentNamespace;
+      const node =
+        namespace === HTML_NAMESPACE
+          ? document.createElement(tag)
+          : document.createElementNS(namespace, tag);
       const attrs = token[2]!;
       for (const attribute of attrs.matchAll(ATTRIBUTE_TOKENIZER)) {
         node.setAttribute(
@@ -96,14 +113,28 @@ export function parseHtml(html: string, contextNode: Node) {
         );
       }
       parent.append(node);
-      if (isVoidElement(node)) continue;
+      if (isVoidElement(node) || (namespace !== HTML_NAMESPACE && token[4])) {
+        continue;
+      }
       stack.push({element: node, target: parent});
       parent =
-        tag.toLowerCase() === 'template'
+        namespace === HTML_NAMESPACE && normalizedTag === 'template'
           ? (node as HTMLTemplateElement).content
           : node;
     } else if (token[5]) {
-      parent = stack.pop()?.target ?? root;
+      const closingTag = asciiLowercase(token[5]);
+      for (let index = stack.length - 1; index >= 0; index--) {
+        const frame = stack[index]!;
+        const frameName = asciiLowercase(frame.element[NAME]);
+        if (frameName === closingTag) {
+          parent = frame.target;
+          stack.length = index;
+          break;
+        }
+        if (frame.element[NS] === HTML_NAMESPACE && frameName === 'template') {
+          break;
+        }
+      }
     } else if (token[6]) {
       parent.append(document.createComment(token[6]!));
     } else {
